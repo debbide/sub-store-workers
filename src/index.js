@@ -27,6 +27,7 @@ import registerLogRoutes from '@/restful/logs';
 import { produceArtifact } from '@/restful/sync';
 import { syncToGist } from '@/restful/artifacts';
 import { gistBackupAction } from '@/restful/miscs';
+import { consumeShareToken } from '@/restful/token';
 import { SETTINGS_KEY, ARTIFACTS_KEY, SUBS_KEY, COLLECTIONS_KEY } from '@/constants';
 import { findByName } from '@/utils/database';
 
@@ -134,6 +135,38 @@ export default {
             migrate();
 
             console.log(`Sub-Store Workers v${version} handling: ${request.method} ${pathname}`);
+
+            // /share/ 路由的 token 验证（与上游 Node.js 版 be_merge 行为一致）
+            if (pathname.startsWith('/share/') && url.searchParams.has('token')) {
+                if (request.method.toUpperCase() !== 'GET') {
+                    return new Response(JSON.stringify({ status: 'failed', message: 'Method not allowed' }), {
+                        status: 405,
+                        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+                    });
+                }
+                const decodedPathname = decodeURIComponent(pathname);
+                const shareToken = consumeShareToken({
+                    token: url.searchParams.get('token'),
+                    pathname: decodedPathname,
+                });
+                if (!shareToken) {
+                    // token 无效
+                    const settings = $.read(SETTINGS_KEY);
+                    if (settings?.appearanceSetting?.invalidShareFakeNode) {
+                        // 返回假节点
+                        const fakeUrl = new URL(request.url);
+                        fakeUrl.pathname = pathname.replace(/\/share\/.*?\//, '/share/sub/');
+                        fakeUrl.searchParams.set('_fakeNode', 'true');
+                        request = new Request(fakeUrl.toString(), request);
+                    } else {
+                        return new Response(JSON.stringify({ status: 'failed', message: 'Invalid or expired share token' }), {
+                            status: 404,
+                            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+                        });
+                    }
+                }
+                // token 有效，继续正常路由
+            }
 
             // 路由分发
             const response = await $app.handleRequest(request);
